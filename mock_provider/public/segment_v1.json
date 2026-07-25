@@ -1,0 +1,48 @@
+{
+  "provider_id": "acme-retail",
+  "version": 1,
+  "published_at": "2026-07-23T06:47:44+00:00",
+  "upserts": [
+    {
+      "id": "sku-1001",
+      "name": "Stainless Steel Water Bottle 1L",
+      "category": "kitchenware",
+      "price": 899,
+      "currency": "INR",
+      "in_stock": true
+    },
+    {
+      "id": "sku-1002",
+      "name": "Cotton Bath Towel (Pack of 2)",
+      "category": "home-textiles",
+      "price": 1249,
+      "currency": "INR",
+      "in_stock": true
+    },
+    {
+      "id": "sku-1003",
+      "name": "Ceramic Coffee Mug 350ml",
+      "category": "kitchenware",
+      "price": 349,
+      "currency": "INR",
+      "in_stock": true
+    },
+    {
+      "id": "sku-1004",
+      "name": "LED Desk Lamp with USB Port",
+      "category": "lighting",
+      "price": 1599,
+      "currency": "INR",
+      "in_stock": false
+    },
+    {
+      "id": "sku-1005",
+      "name": "Bamboo Cutting Board Large",
+      "category": "kitchenware",
+      "price": 749,
+      "currency": "INR",
+      "in_stock": true
+    }
+  ],
+  "removals": []
+}

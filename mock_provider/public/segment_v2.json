@@ -1,0 +1,35 @@
+{
+  "provider_id": "acme-retail",
+  "version": 2,
+  "published_at": "2026-07-23T06:47:44+00:00",
+  "upserts": [
+    {
+      "id": "sku-1003",
+      "name": "Ceramic Coffee Mug 350ml",
+      "category": "kitchenware",
+      "price": 399,
+      "currency": "INR",
+      "in_stock": false
+    },
+    {
+      "id": "sku-1006",
+      "name": "Wall Clock Minimalist 30cm",
+      "category": "home-decor",
+      "price": 1199,
+      "currency": "INR",
+      "in_stock": true
+    },
+    {
+      "id": "sku-1007",
+      "name": "Insulated Lunch Box 2 Tier",
+      "category": "kitchenware",
+      "price": 1449,
+      "currency": "INR",
+      "in_stock": true
+    }
+  ],
+  "removals": [
+    "sku-1004",
+    "sku-9999"
+  ]
+}

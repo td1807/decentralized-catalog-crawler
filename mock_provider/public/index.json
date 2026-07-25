@@ -1,0 +1,27 @@
+{
+  "payload": {
+    "provider_id": "acme-retail",
+    "version": 2,
+    "key_id": "acme-key-2026-01",
+    "published_at": "2026-07-23T06:47:44+00:00",
+    "segments": [
+      {
+        "version": 1,
+        "url": "segment_v1.json",
+        "digest": "sha256:79c037eee40e88e2abb46d3b04ee8f013e6864c89da2234dfadb4550e2e12768",
+        "size_bytes": 1053
+      },
+      {
+        "version": 2,
+        "url": "segment_v2.json",
+        "digest": "sha256:fe4d9f71af73959881caff9b6bbe240dbfb10d70ba0481c0490a7a497340ecb2",
+        "size_bytes": 714
+      }
+    ]
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "acme-key-2026-01",
+    "value": "d1sLt5+tM7Jfvtepud7jYPVxEGWy30UYL+Hph1cvEB+6lemj8V+OeuwXlb7z137FwXmiQpGdqI32z7kBcJB3Cg=="
+  }
+}

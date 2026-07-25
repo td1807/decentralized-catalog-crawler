@@ -1,0 +1,12 @@
+{
+  "provider_id": "acme-retail",
+  "name": "Acme Retail Pvt Ltd",
+  "index_url": "index.json",
+  "public_key": {
+    "key_id": "acme-key-2026-01",
+    "algorithm": "ed25519",
+    "encoding": "base64",
+    "value": "4T6yDPlGs+jAWNjM5BJ773HHRjLQ9VHhuGwzi76BW6Q="
+  },
+  "created_at": "2026-07-23T06:47:44+00:00"
+}

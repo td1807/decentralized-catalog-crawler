@@ -1,0 +1,25 @@
+# Same crawler, same code path, but fetching over real HTTP.
+#
+# Start the static server first (from the repository root):
+#
+#     python -m http.server 8000 --directory mock_provider/public
+#
+# then in a second terminal:
+#
+#     python main.py crawl --config config.http.yaml
+#
+# This proves the crawler is not doing anything special for local files - the
+# provider really is just static JSON on a web server, exactly as the brief
+# describes (a CDN or S3 bucket).
+
+crawler:
+  database_path: ./data/catalog-http.db
+  request_timeout_seconds: 10
+  max_retries: 3
+  retry_backoff_seconds: 0.5
+  max_download_bytes: 10485760
+
+providers:
+  - id: acme-retail
+    manifest_url: http://127.0.0.1:8000/manifest.json
+    enabled: true

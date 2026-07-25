@@ -1,0 +1,12 @@
+# Runtime dependencies.
+#
+# Deliberately minimal - three libraries, all widely used and well maintained.
+# SQLite needs no entry here because it ships inside Python's standard library,
+# which is part of why it was chosen as the storage backend.
+
+cryptography>=42.0.0   # Ed25519 signature verification
+PyYAML>=6.0            # configuration file parsing
+requests>=2.31.0       # HTTP fetching
+
+# Test-only dependency
+pytest>=8.0.0
