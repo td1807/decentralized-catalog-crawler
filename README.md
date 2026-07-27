@@ -1,8 +1,8 @@
 # Decentralized Catalog Crawler
 
-A configuration-driven crawler that discovers catalog data published as static JSON by independent providers, cryptographically verifies that the data is authentic and untampered, and merges it into a single aggregated catalog.
+A crawler that finds catalog data published as static JSON by independent providers, checks the data is authentic and hasn't been tampered with, and merges it all into one catalog. It's driven entirely by a config file.
 
-Because providers publish to plain static hosting (S3, a CDN) with no live API, we cannot rely on transport security or an authenticated endpoint to tell us the data is genuine. Trust has to come from the data itself. That constraint shapes the entire design.
+Providers publish to plain static hosting like S3 or a CDN, with no live API. So there's no authenticated endpoint or transport security to lean on to prove the data is genuine — the trust has to come from the data itself. That single constraint drove most of the design decisions here.
 
 ---
 
@@ -116,7 +116,7 @@ For each configured provider, the crawler:
 4. Works out which segments are new (`version > last_applied_version`).
 5. For each, in strict ascending order: fetch the bytes, **verify the SHA-256 digest** against the signed index, then apply it to storage inside a single transaction.
 
-Nothing is parsed, trusted or stored until both cryptographic gates have passed.
+Nothing gets parsed, trusted, or stored until both crypto checks pass.
 
 ---
 
@@ -162,7 +162,7 @@ config.yaml  ─────────────┐
 | `crawler/canonical.py` | Deterministic JSON serialisation for signing. |
 | `crawler/errors.py` | Typed exception hierarchy so callers can distinguish transient from trust failures. |
 
-**Why this split matters.** The orchestrator never touches a socket or writes SQL, so swapping SQLite for Postgres means rewriting one file and changing nothing else. The verifier does no I/O, so its tests are fast and exhaustive. And the fetcher's support for `file://` is what lets the entire test suite run offline against the same code path production would use.
+Why bother splitting it up like this? The orchestrator never touches a socket or writes SQL, so if you wanted to swap SQLite for Postgres you'd only rewrite one file. The verifier does no I/O at all, which makes it easy to test thoroughly. And because the fetcher handles file:// URLs, the whole test suite can run offline against the exact same code path production uses.
 
 ---
 
@@ -184,11 +184,11 @@ manifest.json ──contains──> PUBLIC KEY
                           segment_v1.json, segment_v2.json, ...
 ```
 
-Public-key operations are expensive; hashing is nearly free. Signing the index and hashing the segments gets full coverage at the cost of one signature check.
+Public-key operations are expensive and hashing is basically free, so signing the index and hashing the segments gets us full coverage for the price of a single signature check.
 
 ### Choice of primitives
 
-**Ed25519** for signatures. Deterministic (no dependence on a good random number generator at signing time, which is where ECDSA implementations have historically failed catastrophically), fast, with small 32-byte keys and 64-byte signatures, and no parameter choices to get wrong. RSA would also work but with much larger keys and more ways to misconfigure it.
+**Ed25519** for signatures. It's deterministic, so it doesn't depend on a good random number generator at signing time — which is exactly where a lot of ECDSA implementations have blown up badly. It's also fast, the keys are small (32 bytes, 64-byte signatures), and there are no parameters to get wrong. RSA would work too, but with much bigger keys and more ways to misconfigure it.
 
 **SHA-256** for digests. Standard, collision-resistant, universally available. Digests are stored as `sha256:<hex>` rather than bare hex so the algorithm can be upgraded later without ambiguity — and so an attacker cannot silently downgrade us to a broken hash, which the crawler explicitly rejects.
 
@@ -210,7 +210,7 @@ All of these have tests in `tests/test_verification.py`, each named after the at
 
 ### Fail closed
 
-Every verification failure aborts that provider immediately and writes nothing. There is no "log a warning and continue" path. A crawler that stores data it could not verify is worse than one that stores nothing, because downstream consumers cannot tell the difference.
+Any verification failure stops that provider right there and writes nothing. There's no "log a warning and keep going" path on purpose. A crawler that stores data it couldn't verify is worse than one that stores nothing at all, since whatever's reading from it downstream has no way to tell the good data from the bad.
 
 ### What this does *not* protect against
 
@@ -302,13 +302,13 @@ ON CONFLICT(provider_id, item_id) DO UPDATE SET
 
 Removals are a scoped delete. Deleting an ID that does not exist is treated as a **no-op, not an error** — providers legitimately republish removals, and a harmless duplicate must not fail an otherwise valid segment.
 
-**Segments are deltas, so order is load-bearing.** Applying v2 before v1 produces a different, wrong end state. The crawler sorts by version and applies strictly in sequence. If the index has a *gap* (v1 and v3 but no v2), it applies v1 and stops, picking up the rest on a later run once v2 appears — rather than skipping ahead and silently corrupting the merged view.
+**Segments are deltas, so the order they're applied in matters a lot. Apply v2 before v1 and you get a different, wrong result. The crawler sorts by version and applies them strictly in order. If there's a gap in the index (say v1 and v3 but no v2), it applies v1 and stops, then picks up the rest on a later run once v2 shows up — better than skipping ahead and quietly corrupting the merged catalog.
 
 ---
 
 ## Resilience: what happens when it crashes
 
-The assignment asks specifically about a crash halfway through downloading or saving a segment. Both cases are handled, and each has a test.
+What happens if the crawler dies halfway through downloading or saving a segment? Both cases are covered, and both have tests.
 
 ### Crash while downloading
 
@@ -318,7 +318,7 @@ There is no window in which partially downloaded bytes could reach the database.
 
 ### Crash while saving
 
-This is the case that matters, and it is handled by putting **the data and the progress marker in the same transaction**:
+This is the case that actually matters, and it's handled by writing the data and the progress marker in the same transaction**:
 
 ```python
 with self.transaction() as cur:          # BEGIN IMMEDIATE
@@ -329,7 +329,7 @@ with self.transaction() as cur:          # BEGIN IMMEDIATE
                                           # COMMIT
 ```
 
-Because they share a transaction, they share a fate. SQLite writes to a write-ahead log first and only marks the transaction committed once that log entry is durable, so at any instant the database on disk reflects either the state *before* the segment or the state *after* it — never halfway. If the process is killed mid-write, the next connection sees an uncommitted transaction and rolls it back automatically during recovery.
+Since they're in the same transaction, they succeed or fail together. SQLite writes to a write-ahead log first and only counts the transaction as committed once that log entry is safely on disk, so at any given moment the database is either in its state before the segment or after it, never stuck in between. If the process gets killed mid-write, the next connection notices the uncommitted transaction and rolls it back automatically.
 
 The database is configured with `journal_mode=WAL` and `synchronous=FULL`, meaning every commit is fsynced. That costs some write throughput and buys the guarantee that a committed transaction survives an OS crash or power loss — which is precisely the guarantee this design leans on.
 
@@ -348,7 +348,7 @@ That is what makes restart trivial. On the next run the crawler reads the marker
 
 ### What is deliberately *not* handled
 
-Two crawler processes running concurrently against the same database would both attempt the same segments. `BEGIN IMMEDIATE` makes this safe — one blocks, and the loser's work is idempotent anyway — but it is wasteful. A production deployment would add an advisory lock or lease per provider. This is called out rather than silently ignored because it is a real gap, just not one worth solving at this scale.
+If you ran two crawler processes against the same database at once, they'd both go after the same segments. BEGIN IMMEDIATE keeps this safe — one just blocks, and the loser's work is idempotent anyway — but it's wasteful. In production I'd add an advisory lock or a lease per provider. I'm flagging it rather than pretending it isn't there, because it's a real gap; it's just not worth solving at this scale.
 
 ---
 
@@ -368,7 +368,7 @@ Every test builds its own provider in a temporary directory with a freshly gener
 | `tests/test_storage.py` | 14 tests. Merge semantics, provider isolation, and the atomicity guarantees — including deliberately crashing mid-transaction and asserting the database is untouched. |
 | `tests/test_crawler.py` | 17 tests. End-to-end crawls, incremental publishes, resume-after-crash, failure isolation, config validation. |
 
-The most important test is `test_crash_midway_through_a_transaction_leaves_no_partial_data`, which proves the resilience claim above rather than just asserting it in prose.
+The most important test is `test_crash_midway_through_a_transaction_leaves_no_partial_data`, which actually proves the resilience claim above instead of just asserting it.
 
 ---
 
@@ -407,7 +407,7 @@ Exit codes are meaningful so the crawler can be scheduled and monitored without 
 
 ## Trade-offs and what I would change at scale
 
-Choices made deliberately for this exercise, and what production would need instead:
+Things I chose deliberately for this exercise, and what I'd do differently in production:
 
 **Segments are downloaded fully into memory.** Fine for catalog deltas of a few megabytes and it keeps the verify-before-parse logic simple. At hundreds of megabytes I would stream to a temp file, hash while streaming, and only then parse — verifying before parsing either way, since parsing untrusted input is itself an attack surface.
 
