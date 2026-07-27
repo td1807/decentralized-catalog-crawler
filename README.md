@@ -293,7 +293,7 @@ Three design decisions worth calling out:
 
 **`applied_segments` as an audit trail.** Answers "when did we ingest this, and what digest did we verify?" long after the fact, and provides a second layer of idempotency protection.
 
-### Merge semantics
+### How segments get merged
 
 Upserts use SQLite's native upsert:
 
@@ -354,7 +354,7 @@ That is what makes restart trivial. On the next run the crawler reads the marker
 
 ### What is deliberately *not* handled
 
-If you ran two crawler processes against the same database at once, they'd both go after the same segments. BEGIN IMMEDIATE keeps this safe — one just blocks, and the loser's work is idempotent anyway — but it's wasteful. In production I'd add an advisory lock or a lease per provider. I'm flagging it rather than pretending it isn't there, because it's a real gap; it's just not worth solving at this scale.
+If you ran two crawler processes against the same database at once, they'd both go after the same segments. BEGIN IMMEDIATE keeps this safe, one just blocks, and the loser's work is idempotent anyway — but it's wasteful. In production I'd add an advisory lock or a lease per provider. I'm flagging it rather than pretending it isn't there, because it's a real gap; it's just not worth solving at this scale.
 
 ---
 
