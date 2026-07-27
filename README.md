@@ -28,7 +28,8 @@ Requires Python 3.9 or newer. No database server, no Docker, nothing to install 
 # 1. Create an isolated environment
 python -m venv .venv
 
-#    Windows (PowerShell):
+#    Windows (PowerShell) - if activation is blocked, first run:
+#      Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .venv\Scripts\Activate.ps1
 #    macOS / Linux:
 source .venv/bin/activate
@@ -46,6 +47,7 @@ python main.py crawl --config config.yaml
 python main.py status --config config.yaml
 python main.py list   --config config.yaml
 ```
+**Windows note:** if PowerShell blocks the activation script with an execution-policy error, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` once in that terminal, then activate again. It only affects the current session.
 
 Expected output from step 4:
 
