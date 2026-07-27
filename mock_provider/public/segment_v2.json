@@ -1,5 +1,5 @@
 {
-  "provider_id": "Wallmart",
+  "provider_id": "acme-retail",
   "version": 2,
   "published_at": "2026-07-25T06:47:44+00:00",
   "upserts": [
