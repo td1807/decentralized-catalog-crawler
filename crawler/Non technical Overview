@@ -1,0 +1,23 @@
+Here's the plain-language version, using an analogy: think of this as software that manages a farmers' market with stalls run by strangers you've never met.
+
+The setup. Different vendors — call them Acme Retail, Bob's Produce, whoever — each keep their own inventory list on their own website, updated whenever their stock changes. Nobody controls a central inventory system; every vendor is independent. Your program's job is to visit each vendor's page, read their latest inventory, and merge it all into one master list that a shopper could search across every vendor at once.
+
+The trust problem. These vendor pages are just plain files sitting on ordinary web hosting — nothing fancy guarantees they're genuine. Anyone who can tamper with that hosting (or intercept the connection) could slip in a fake inventory list — cheaper prices that don't exist, items that were never in stock. So the program can't just trust whatever it downloads. It needs proof, baked into the data itself, that "this really came from Acme, and nobody altered a byte of it since Acme published it."
+
+How the proof works. Each vendor has a signature, like a wax seal pressed with a signet ring only they own. When Acme publishes their inventory list, they seal it with their private stamp. Your program has Acme's public seal pattern (published separately, in a "manifest" file — think of it as Acme's storefront sign) and checks: does this seal match? If someone swapped the inventory list, the seal breaks, and the program refuses to read it at all. That's gate one.
+
+Gate two is per-item: the sealed list doesn't contain the actual inventory changes directly — it contains a short fingerprint (like a barcode) of each shipment of new/changed items. When the program downloads an actual shipment, it recomputes the fingerprint and checks it matches what the sealed list promised. If even one item was swapped in that shipment, the fingerprint won't match, and that shipment gets thrown out.
+
+So nothing enters the master list unless it passed both checks: the seal on the summary, and the fingerprint on the actual goods.
+
+Why order matters. Vendors don't republish their whole inventory every time — they publish incremental updates, like "shipment #1 adds these five items," "shipment #2 removes one item and adds three." These have to be applied in order, because applying shipment #2 before #1 would leave the ledger in a state that never actually existed. If a shipment is missing (say #2 never showed up), the program stops right there and waits, rather than guessing and skipping ahead — because guessing wrong quietly corrupts the whole ledger.
+
+Why nothing gets half-saved. The riskiest moment is writing to the master ledger — what if the computer loses power halfway through recording a shipment? The program treats "save these items" and "mark this shipment as done" as one indivisible action: either both happen, or neither does. So a crash mid-save leaves the ledger exactly as it was before that shipment — never a half-written mess. On restart, it just picks up where it left off, no cleanup needed.
+
+Why one vendor's bad data can't sink the rest. Each vendor is processed independently. If Bob's Produce serves garbage, or their seal doesn't check out, the program logs that failure and moves on to the next vendor. Acme's data isn't affected by Bob's problems.
+
+Why SQLite instead of, say, a folder of text files. The author needed a filing system that can guarantee the "all or nothing" save behavior above, and can efficiently update a single item without rewriting the entire ledger. A folder of loose JSON files can't guarantee that — a crash mid-write can leave a corrupted file. A lightweight embedded database (SQLite) gives those guarantees for free and needs no separate server, which is also why the project runs with zero setup.
+
+What this deliberately does not solve. A vendor could seal a lie — a valid seal only proves the message came from that vendor, not that the vendor is honest. And if a vendor's private stamp gets stolen, whoever has it can forge convincing inventory on their behalf. The README is upfront about both of these as known, out-of-scope limits.
+
+That's the whole system: read each vendor's signed claims, verify the seal and the fingerprints, apply the changes in strict order, and never let a half-finished write or one bad vendor corrupt the shared ledger.
