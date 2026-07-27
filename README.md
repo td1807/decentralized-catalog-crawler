@@ -93,7 +93,7 @@ The default config reads the mock provider from disk so the project runs with no
 ```bash
 The core promise of this project is the same code path works whether the data comes from a local file or a real CDN over HTTP.
 This section shows the crawler pulling from an actual HTTP server (python -m http.server, which behaves just like a CDN) using a different config file, with zero code changes.
-That's the proof that the `file://` vs `http://` handling in the fetcher is real, not a shortcut.
+That is the proof that the `file://` vs `http://` handling in the fetcher is real, not a shortcut.
 
 # Terminal 1 - serve the static files, exactly like a CDN would
 python -m http.server 8000 --directory mock_provider/public
