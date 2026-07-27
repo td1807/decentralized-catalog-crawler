@@ -454,5 +454,3 @@ decentralized-catalog-crawler/
     ├── test_storage.py            merge and atomicity tests
     └── test_crawler.py            end-to-end tests
 ```
-
-**A note on the mock provider's private key.** `generate_mock_data.py` writes `mock_provider/private_key.pem` so the mock data is reproducible. It is excluded by `.gitignore`, because a real provider's signing key would live in a KMS or HSM and never touch source control. The *public* key is committed inside `manifest.json`, which is exactly where it belongs.
