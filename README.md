@@ -366,12 +366,12 @@ python -m pytest -v           # verbose
 python -m pytest tests/test_verification.py   # security tests only
 ```
 
-Every test builds its own provider in a temporary directory with a freshly generated keypair and genuinely valid signatures. Nothing is stubbed. The tests drive the same fetch → verify → store path a production crawl uses, just over `file://` URLs — so they run offline in under a second while still exercising the real cryptography.
+Every test builds its own provider in a temporary directory with a freshly generated keypair and genuinely valid signatures. Nothing is stubbed. The tests drive the same fetch → verify → store path a production crawl uses, just over `file://` URLs , so they run offline in under a second while still exercising the real cryptography.
 
 | File | Covers |
 |---|---|
 | `tests/test_verification.py` | 16 tests. Valid signatures accepted; every tampering scenario in the attack table rejected. |
-| `tests/test_storage.py` | 14 tests. Merge semantics, provider isolation, and the atomicity guarantees — including deliberately crashing mid-transaction and asserting the database is untouched. |
+| `tests/test_storage.py` | 14 tests. Covers the merge logic, keeping providers isolated from each other, and the atomicity guarantee.One test literally crashes mid-transaction and then checks the database wasn't left in a broken state. |
 | `tests/test_crawler.py` | 17 tests. End-to-end crawls, incremental publishes, resume-after-crash, failure isolation, config validation. |
 
 The most important test is `test_crash_midway_through_a_transaction_leaves_no_partial_data`, which actually proves the resilience claim above instead of just asserting it.
