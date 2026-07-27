@@ -1,85 +1,23 @@
-# Understanding This Project — No Coding Background Required
+Here's the plain-language version, using an analogy: think of this as software that manages a farmers' market with stalls run by strangers you've never met.
 
-> **TL;DR** — This program is an automated inspector for a marketplace with no central authority. Independent sellers each publish their own inventory online; the program visits each one, checks a cryptographic "wax seal" and "barcode" to prove nothing was forged or altered, and only then merges the verified data into one master ledger. If anything fails the check, that seller's update is thrown out — nothing broken ever gets saved.
+The setup. Different vendors — call them Acme Retail, Bob's Produce, whoever — each keep their own inventory list on their own website, updated whenever their stock changes. Nobody controls a central inventory system; every vendor is independent. Your program's job is to visit each vendor's page, read their latest inventory, and merge it all into one master list that a shopper could search across every vendor at once.
 
----
+The trust problem. These vendor pages are just plain files sitting on ordinary web hosting — nothing fancy guarantees they're genuine. Anyone who can tamper with that hosting (or intercept the connection) could slip in a fake inventory list — cheaper prices that don't exist, items that were never in stock. So the program can't just trust whatever it downloads. It needs proof, baked into the data itself, that "this really came from Acme, and nobody altered a byte of it since Acme published it."
 
-## The Analogy
+How the proof works. Each vendor has a signature, like a wax seal pressed with a signet ring only they own. When Acme publishes their inventory list, they seal it with their private stamp. Your program has Acme's public seal pattern (published separately, in a "manifest" file — think of it as Acme's storefront sign) and checks: does this seal match? If someone swapped the inventory list, the seal breaks, and the program refuses to read it at all. That's gate one.
 
-Picture a farmers' market with independent stalls — Acme Retail, Bob's Produce, and others. There's no market manager tracking everyone's stock centrally. Each vendor posts their own inventory list on their own website, updated whenever it changes.
+Gate two is per-item: the sealed list doesn't contain the actual inventory changes directly — it contains a short fingerprint (like a barcode) of each shipment of new/changed items. When the program downloads an actual shipment, it recomputes the fingerprint and checks it matches what the sealed list promised. If even one item was swapped in that shipment, the fingerprint won't match, and that shipment gets thrown out.
 
-You want one search page where a shopper can look across *every* vendor at once. Something has to visit each vendor's page, read their latest list, and merge it into a single master ledger — without ever trusting a forged or tampered list. That "something" is this program.
+So nothing enters the master list unless it passed both checks: the seal on the summary, and the fingerprint on the actual goods.
 
-| In the story... | In the actual system... |
-|---|---|
-| A vendor's stall | A data provider (e.g. a retailer) |
-| The stall's signboard | `manifest.json` — publishes the vendor's public key |
-| The sealed inventory summary | `index.json` — a signed list of updates, each with a fingerprint |
-| A delivery batch | A "segment" — the actual items to add or remove |
-| A wax seal on the summary | A digital (Ed25519) signature |
-| A barcode on each batch | A SHA-256 digital fingerprint |
-| The market's master ledger | The local database the program builds |
-| The inspector doing rounds | This crawler program |
+Why order matters. Vendors don't republish their whole inventory every time — they publish incremental updates, like "shipment #1 adds these five items," "shipment #2 removes one item and adds three." These have to be applied in order, because applying shipment #2 before #1 would leave the ledger in a state that never actually existed. If a shipment is missing (say #2 never showed up), the program stops right there and waits, rather than guessing and skipping ahead — because guessing wrong quietly corrupts the whole ledger.
 
----
+Why nothing gets half-saved. The riskiest moment is writing to the master ledger — what if the computer loses power halfway through recording a shipment? The program treats "save these items" and "mark this shipment as done" as one indivisible action: either both happen, or neither does. So a crash mid-save leaves the ledger exactly as it was before that shipment — never a half-written mess. On restart, it just picks up where it left off, no cleanup needed.
 
-## Why Trust Is the Hard Part
+Why one vendor's bad data can't sink the rest. Each vendor is processed independently. If Bob's Produce serves garbage, or their seal doesn't check out, the program logs that failure and moves on to the next vendor. Acme's data isn't affected by Bob's problems.
 
-These vendor pages are just plain files on ordinary web hosting — nothing about the hosting itself guarantees they're genuine. Anyone who tampered with that hosting, or intercepted the connection, could slip in a fake list: prices that don't exist, phantom stock, deleted items that were never actually gone.
+Why SQLite instead of, say, a folder of text files. The author needed a filing system that can guarantee the "all or nothing" save behavior above, and can efficiently update a single item without rewriting the entire ledger. A folder of loose JSON files can't guarantee that — a crash mid-write can leave a corrupted file. A lightweight embedded database (SQLite) gives those guarantees for free and needs no separate server, which is also why the project runs with zero setup.
 
-So the inspector never takes a downloaded file at face value. Everything must prove itself before it's trusted.
+What this deliberately does not solve. A vendor could seal a lie — a valid seal only proves the message came from that vendor, not that the vendor is honest. And if a vendor's private stamp gets stolen, whoever has it can forge convincing inventory on their behalf. The README is upfront about both of these as known, out-of-scope limits.
 
-## Two Checkpoints, No Exceptions
-
-**Checkpoint 1 — the seal.**
-Each vendor seals their sealed inventory summary with a private stamp only they hold. The inspector checks that stamp against the vendor's publicly known seal pattern. Mismatch → the whole file is rejected, unread.
-
-**Checkpoint 2 — the barcode.**
-The sealed summary doesn't carry the actual changes — it carries a fingerprint for each delivery batch. When the inspector downloads a batch, it recomputes the fingerprint. If even one item was swapped in transit, the fingerprint won't match, and that batch is discarded.
-
-```
-   vendor's signboard                sealed summary               delivery batch
-  ┌───────────────────┐      ┌────────────────────────┐      ┌──────────────────┐
-  │   public seal      │─────▶│  ✔ seal verified here   │─────▶│ ✔ fingerprint     │
-  │   pattern          │      │  lists batch versions   │      │   checked here    │
-  └───────────────────┘      │  + a fingerprint each    │      └──────────────────┘
-                              └────────────────────────┘               │
-                                                                        ▼
-                                                              only now: merged into
-                                                                the master ledger
-```
-
-Nothing is parsed, trusted, or saved until *both* checkpoints pass.
-
-## Order Is Not Optional
-
-Vendors publish incremental updates — "batch #1 adds five items," "batch #2 removes one, adds three." Applying #2 before #1 produces a ledger state that never really existed. If a batch goes missing, the inspector stops exactly there and waits for it on the next visit, rather than guessing and silently corrupting everything downstream.
-
-## Nothing Is Ever Half-Saved
-
-The riskiest moment is the actual save. If the computer loses power mid-write, is the ledger left in a broken, half-updated state? No — "save the items" and "mark this batch as complete" are treated as one inseparable action. Either both happen, or neither does. A crash simply means: try again next time, from exactly where it left off.
-
-## One Bad Vendor Can't Sink the Rest
-
-Every vendor is inspected independently. If one serves garbage data or fails its seal check, that failure is logged and the inspector moves on — untouched, the other vendors' data keeps flowing in normally.
-
-## Quick Reference: What Could Go Wrong, and What Stops It
-
-| If someone tried to... | This happens |
-|---|---|
-| Edit a delivery batch after it was published | Fingerprint no longer matches → rejected |
-| Edit the summary to match a forged batch | Seal breaks → rejected |
-| Forge a summary using their own fake stamp | Stamp doesn't match the vendor's known seal → rejected |
-| Replay an old, previously-valid summary to hide a recall | Version number would go backwards → rejected |
-| Pass off one vendor's data as another's | Vendor identity embedded in the data doesn't match → rejected |
-| Flood the inspector with an endless fake response | Download is capped at a fixed size → aborted |
-
-## What This Deliberately Doesn't Solve
-
-A vendor can seal a lie — the seal only proves *who sent it*, not that they were telling the truth. And if a vendor's private stamp is ever stolen, whoever holds it can forge convincing data in that vendor's name. These are known, out-of-scope limits, not oversights.
-
----
-
-### In one sentence
-
-An automated inspector that visits independent vendors' public postings, verifies with cryptographic seals and fingerprints that nothing was forged or tampered with, and merges only what survives that check into one searchable, crash-safe ledger.
+That's the whole system: read each vendor's signed claims, verify the seal and the fingerprints, apply the changes in strict order, and never let a half-finished write or one bad vendor corrupt the shared ledger.
