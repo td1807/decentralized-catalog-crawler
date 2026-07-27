@@ -1,31 +1,35 @@
 # Decentralized Catalog Crawler
 
-A configuration-driven crawler that discovers catalog data published as static JSON by independent providers, verifies it's authentic and untampered, and merges it into a single aggregated catalog.
+A configuration-driven crawler that discovers catalog data published as static JSON by independent providers, cryptographically verifies that the data is authentic and untampered, and merges it into a single aggregated catalog.
 
-The awkward part of the problem is that providers publish to plain static hosting (S3, a CDN) with no live API. So there's no authenticated endpoint and no TLS handshake with the provider that tells us the data is genuine — we're fetching files off whatever server they happen to use. Trust has to come from the data itself, and that constraint drives most of the design below.
+Because providers publish to plain static hosting (S3, a CDN) with no live API, we cannot rely on transport security or an authenticated endpoint to tell us the data is genuine. Trust has to come from the data itself. That constraint shapes the entire design.
+
+---
 
 ## Table of contents
 
-* [Quick start](#quick-start)
-* [What the crawler does](#what-the-crawler-does)
-* [Architecture](#architecture)
-* [Security model](#security-model)
-* [Storage design and merging](#storage-design-and-merging)
-* [Resilience: what happens when it crashes](#resilience-what-happens-when-it-crashes)
-* [Testing](#testing)
-* [Configuration reference](#configuration-reference)
-* [Trade-offs and what I'd change at scale](#trade-offs-and-what-id-change-at-scale)
+- [Quick start](#quick-start)
+- [What the crawler does](#what-the-crawler-does)
+- [Architecture](#architecture)
+- [Security model](#security-model)
+- [Storage design and merging](#storage-design-and-merging)
+- [Resilience: what happens when it crashes](#resilience-what-happens-when-it-crashes)
+- [Testing](#testing)
+- [Configuration reference](#configuration-reference)
+- [Trade-offs and what I would change at scale](#trade-offs-and-what-i-would-change-at-scale)
+
+---
 
 ## Quick start
 
-Needs Python 3.9+. There's no database server, no Docker, nothing to install beyond three Python packages.
+Requires Python 3.9 or newer. No database server, no Docker, nothing to install beyond three Python packages.
 
 ```bash
 # 1. Create an isolated environment
 python -m venv .venv
 
 #    Windows (PowerShell):
-.venv\\Scripts\\Activate.ps1
+.venv\Scripts\Activate.ps1
 #    macOS / Linux:
 source .venv/bin/activate
 
@@ -33,7 +37,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Generate the mock provider (real keypair, real signatures)
-python mock\_provider/generate\_mock\_data.py
+python mock_provider/generate_mock_data.py
 
 # 4. Crawl it
 python main.py crawl --config config.yaml
@@ -43,7 +47,7 @@ python main.py status --config config.yaml
 python main.py list   --config config.yaml
 ```
 
-Step 4 should print something like:
+Expected output from step 4:
 
 ```
 INFO     Crawling provider 'acme-retail'
@@ -57,12 +61,12 @@ INFO       committed segment v2 (3 upserted, 1 removed)
 
 Crawl summary
 ------------------------------------------------------------
-  \[OK]          acme-retail: applied v1, v2 -> 8 upserted, 1 removed
+  [OK]          acme-retail: applied v1, v2 -> 8 upserted, 1 removed
 ------------------------------------------------------------
   1 provider(s) processed, 0 failed.
 ```
 
-Run it again and it reports `\[UP-TO-DATE]` without re-downloading anything.
+Run it a second time and it reports `[UP-TO-DATE]` without re-downloading anything.
 
 ### Run the tests
 
@@ -70,39 +74,55 @@ Run it again and it reports `\[UP-TO-DATE]` without re-downloading anything.
 python -m pytest
 ```
 
-47 tests, under a second, fully offline.
+47 tests, under a second, entirely offline.
 
-### Watch the security layer catch an attack
+### See the security layer catch an attack
 
 ```bash
-python scripts/demo\_tamper.py
+python scripts/demo_tamper.py
 ```
 
-Runs one honest crawl and three tampering attacks, and shows each attack being rejected with nothing written to the database.
+This runs four scenarios — one honest crawl and three different tampering attacks — and shows each attack being rejected with zero rows written.
 
 ### Crawl over real HTTP instead of local files
 
-The default config reads the mock provider off disk so the project runs with no server. To exercise the same code path over the network:
+The default config reads the mock provider from disk so the project runs with no server. To prove the same code path works over the network:
 
 ```bash
 # Terminal 1 - serve the static files, exactly like a CDN would
-python -m http.server 8000 --directory mock\_provider/public
+python -m http.server 8000 --directory mock_provider/public
 
 # Terminal 2
 python main.py crawl --config config.http.yaml
 ```
 
+---
+
 ## What the crawler does
 
-A provider publishes three kinds of file. The `manifest.json` rarely changes and holds the provider's public key plus a pointer to their index — it's the root of trust. The `index.json` is rewritten on every publish and contains a signed, version-numbered list of the available segments, each with a SHA-256 digest. The `segment\_vN.json` files are append-only and hold the actual deltas: items to upsert and item IDs to remove.
+A provider publishes three kinds of file:
 
-For each configured provider the crawler fetches the manifest from the URL in the config and checks it names the provider we expected. It fetches the index and verifies its Ed25519 signature against the manifest's public key, then confirms the index version hasn't gone backwards relative to what we've already applied. From there it works out which segments are new (`version > last\_applied\_version`) and, in strict ascending order, fetches each one, checks its SHA-256 digest against the signed index, and applies it to storage inside a single transaction.
+| File | Changes | Purpose |
+|---|---|---|
+| `manifest.json` | Rarely | The provider's public key and a pointer to their index. The root of trust. |
+| `index.json` | Every publish | A signed list of available segments, each with a SHA-256 digest, plus a version number. |
+| `segment_vN.json` | Append-only | The actual deltas: items to upsert, item IDs to remove. |
 
-Nothing gets parsed, trusted, or stored until both cryptographic gates have passed.
+For each configured provider, the crawler:
+
+1. Fetches `manifest.json` from the URL in the config file and confirms it names the provider we expected.
+2. Fetches `index.json` and **verifies its Ed25519 signature** against the manifest's public key.
+3. Confirms the index version has not gone *backwards* relative to what we already applied.
+4. Works out which segments are new (`version > last_applied_version`).
+5. For each, in strict ascending order: fetch the bytes, **verify the SHA-256 digest** against the signed index, then apply it to storage inside a single transaction.
+
+Nothing is parsed, trusted or stored until both cryptographic gates have passed.
+
+---
 
 ## Architecture
 
-Each module does one job and doesn't reach into the others' internals.
+The code is split so that each module has one job and no knowledge of the others' internals.
 
 ```
 config.yaml  ─────────────┐
@@ -118,8 +138,12 @@ config.yaml  ─────────────┐
           v               v               v
     ┌──────────┐   ┌────────────┐   ┌──────────┐
     │ fetcher  │   │  verifier  │   │ storage  │
+    │          │   │            │   │          │
     │ URL ->   │   │ signature  │   │ SQLite,  │
-    │ bytes    │   │ + digest   │   │ atomic   │
+    │ bytes.   │   │ + digest   │   │ atomic   │
+    │ Retries, │   │ checks.    │   │ segment  │
+    │ timeouts,│   │ Pure       │   │ apply.   │
+    │ size cap │   │ functions  │   │          │
     └──────────┘   └────────────┘   └──────────┘
                           ^
                     ┌───────────┐
@@ -127,226 +151,279 @@ config.yaml  ─────────────┐
                     └───────────┘
 ```
 
-* `crawler/config.py` — loads and validates the YAML config, failing fast with a precise message.
-* `crawler/fetcher.py` — turns a URL into bytes. Handles `http(s)://`, `file://` and local paths, with timeouts, bounded retries with exponential backoff, and a download size cap.
-* `crawler/verifier.py` — Ed25519 signature verification and SHA-256 digest checks, written as pure functions with no I/O so they're easy to test exhaustively.
-* `crawler/models.py` — typed dataclasses with validating constructors. Everything from the internet passes through here first.
-* `crawler/storage.py` — SQLite persistence, transactions, and the merge logic.
-* `crawler/crawler.py` — orchestration. Knows the order of operations and delegates the rest.
-* `crawler/canonical.py` — deterministic JSON serialisation for signing.
-* `crawler/errors.py` — a typed exception hierarchy so callers can tell transient failures apart from trust failures.
+| Module | Responsibility |
+|---|---|
+| `crawler/config.py` | Load and validate the YAML config. Fails fast with a precise message. |
+| `crawler/fetcher.py` | Turn a URL into bytes. Handles `http(s)://`, `file://` and local paths. Timeouts, bounded retries with exponential backoff, download size cap. |
+| `crawler/verifier.py` | Ed25519 signature verification and SHA-256 digest verification. Pure functions — no I/O, which makes them trivial to test exhaustively. |
+| `crawler/models.py` | Typed dataclasses with validating constructors. Everything from the internet passes through here first. |
+| `crawler/storage.py` | SQLite persistence. Owns transactions and the merge logic. |
+| `crawler/crawler.py` | Orchestration only. Knows the order of operations, delegates everything else. |
+| `crawler/canonical.py` | Deterministic JSON serialisation for signing. |
+| `crawler/errors.py` | Typed exception hierarchy so callers can distinguish transient from trust failures. |
 
-The payoff from this split: the orchestrator never touches a socket or writes SQL, so moving from SQLite to Postgres means rewriting `storage.py` and nothing else. The verifier does no I/O, so its tests are fast. And the fetcher's `file://` support is what lets the whole suite run offline against the same path production uses.
+**Why this split matters.** The orchestrator never touches a socket or writes SQL, so swapping SQLite for Postgres means rewriting one file and changing nothing else. The verifier does no I/O, so its tests are fast and exhaustive. And the fetcher's support for `file://` is what lets the entire test suite run offline against the same code path production would use.
+
+---
 
 ## Security model
 
 ### The chain of trust
 
-We verify one signature per crawl no matter how many segments exist, because the signed index vouches for every segment by digest:
+We verify **one** signature per crawl regardless of how many segments exist, because the signed index vouches for every segment by digest:
 
 ```
 manifest.json ──contains──> PUBLIC KEY
+                                │
                                 │ verifies
                                 v
                           index.json  (signed with the provider's PRIVATE key)
+                                │
                                 │ declares SHA-256 digest of each
                                 v
-                          segment\_v1.json, segment\_v2.json, ...
+                          segment_v1.json, segment_v2.json, ...
 ```
 
-Public-key verification is expensive and hashing is nearly free, so signing the index and hashing the segments gives full coverage for the cost of a single signature check.
+Public-key operations are expensive; hashing is nearly free. Signing the index and hashing the segments gets full coverage at the cost of one signature check.
 
 ### Choice of primitives
 
-I used **Ed25519** for signatures. It's deterministic — it doesn't depend on a good random number generator at signing time, which is where a number of ECDSA implementations have failed badly — and it's fast, with 32-byte keys and 64-byte signatures and no parameters to misconfigure. RSA would also work, but with larger keys and more ways to get it wrong.
+**Ed25519** for signatures. Deterministic (no dependence on a good random number generator at signing time, which is where ECDSA implementations have historically failed catastrophically), fast, with small 32-byte keys and 64-byte signatures, and no parameter choices to get wrong. RSA would also work but with much larger keys and more ways to misconfigure it.
 
-Digests are **SHA-256**, stored as `sha256:<hex>` rather than bare hex. The prefix means the algorithm can be upgraded later without ambiguity, and it lets the crawler reject an attempt to downgrade to a weaker hash rather than silently accepting it.
+**SHA-256** for digests. Standard, collision-resistant, universally available. Digests are stored as `sha256:<hex>` rather than bare hex so the algorithm can be upgraded later without ambiguity — and so an attacker cannot silently downgrade us to a broken hash, which the crawler explicitly rejects.
 
-### What it defends against
+### Attacks this defends against
 
-The interesting failure modes, and where each is stopped:
+| Attack | Defence |
+|---|---|
+| CDN compromised, segment file edited | Digest mismatch against the signed index |
+| Index edited to match the forged segment | Signature no longer verifies |
+| Attacker signs a forged index with their own key | Signature does not verify against the manifest's public key |
+| Signature swapped in claiming a different key | `key_id` in the signature must match the manifest |
+| Old but validly signed index replayed to hide a recall | Monotonic version check rejects rollbacks |
+| Provider A's signed index replayed as provider B's | `provider_id` in the payload must match the manifest and the config |
+| Segment substituted for another from the same provider | Segment's own declared version must match what the index listed |
+| Endless response to exhaust memory | Streaming download aborts past `max_download_bytes` |
+| Broken hash algorithm declared | Only `sha256` is accepted |
 
-* A CDN is compromised and a segment file is edited → the digest no longer matches the signed index.
-* The index is edited to match the forged segment → the signature stops verifying.
-* An attacker signs a forged index with their own key → it doesn't verify against the manifest's public key.
-* The signature is swapped in claiming a different key → the `key\_id` has to match the manifest.
-* An old but validly-signed index is replayed to hide a recall → the monotonic version check rejects the rollback.
-* Provider A's signed index is replayed as provider B's → the `provider\_id` in the payload has to match both the manifest and the config.
-* One segment is substituted for another from the same provider → the segment's own declared version has to match what the index listed.
-* A server returns an endless response to exhaust memory → the streaming download aborts past `max\_download\_bytes`.
-* A broken hash algorithm is declared → only `sha256` is accepted.
-
-Each of these has a test in `tests/test\_verification.py` named after the attack it simulates.
+All of these have tests in `tests/test_verification.py`, each named after the attack it simulates.
 
 ### Fail closed
 
-Any verification failure aborts that provider immediately and writes nothing. There's no "log a warning and keep going" path, because a crawler that stores data it couldn't verify is worse than one that stores nothing — downstream consumers can't tell the two apart.
+Every verification failure aborts that provider immediately and writes nothing. There is no "log a warning and continue" path. A crawler that stores data it could not verify is worse than one that stores nothing, because downstream consumers cannot tell the difference.
 
-### What it doesn't protect against
+### What this does *not* protect against
 
-Worth being upfront about the limits. A dishonest provider that signs bad data will produce a valid signature; cryptography proves origin, not truthfulness. The manifest itself isn't signed — it's the root of trust, and we trust it because its URL comes from our own config. In production that URL needs to be HTTPS with certificate validation, and ideally the expected `key\_id` would be pinned in the config so a swapped manifest is caught too. And if a provider's private key leaks, everything signed with it is trusted, so a real deployment needs key rotation, expiry, and revocation.
+Honest limitations, stated plainly:
+
+- **A dishonest provider.** If they sign bad data, the signature is valid. Cryptography proves *origin*, not *truthfulness*.
+- **A forged manifest.** The manifest is the root of trust and is not itself signed — we trust it because its URL comes from our own configuration. In production the manifest URL must be HTTPS with certificate validation, and ideally the expected `key_id` would be pinned in the config so a swapped manifest is rejected too.
+- **Key compromise.** If a provider's private key leaks, everything signed with it is trusted. Real deployments need key rotation, an expiry on `key_id`, and a revocation mechanism.
+
+---
 
 ## Storage design and merging
 
-### Why SQLite
+### The choice: SQLite
 
-The workload needs a few specific things. Writes have to be atomic across many rows — a segment is a batch of upserts and removals that must all land or none of them, and that one requirement rules out most of the simple options. It needs upsert-by-key as the core merge operation, and it needs to track per-provider progress durably, committed together with the data that progress describes. Updates should be cheap and incremental, so changing one item doesn't rewrite the whole catalog. And it should be runnable by a reviewer with a clone and nothing else.
+The assignment asks for a justification, so here is the reasoning rather than just the conclusion.
 
-I looked at the obvious candidates:
+**What the workload actually needs:**
 
-Plain JSON files on disk fall over on the first requirement. There are no transactions, so a crash mid-write corrupts the file, and I'd have to hand-roll atomicity with temp-file-plus-rename — which doesn't extend to updating two files together anyway. Every one-item change rewrites the whole catalog.
+1. **Atomic multi-row writes.** A segment contains many upserts and removals that must all land or none of them. This is the single hardest requirement and it eliminates most simple options.
+2. **Upsert by key.** "Insert this item, or overwrite it if it already exists" is the core merge operation.
+3. **Durable progress tracking**, committed together with the data it describes.
+4. **Cheap incremental updates.** Changing one item must not mean rewriting the whole catalog.
+5. **Zero setup for a reviewer.** Someone evaluating this should be able to clone and run.
 
-Postgres is the right answer at real scale: concurrent writers, replication, richer indexing, JSONB with GIN indexes for search. The only reason I didn't use it here is that making a reviewer stand up a server to run a take-home is a bad trade.
+**How the options compare:**
 
-MongoDB's document model fits heterogeneous catalog items nicely and its upsert semantics map well, but it has the same operational cost, and multi-document transactions need a replica set.
+| Option | Verdict |
+|---|---|
+| **Plain JSON files on disk** | Rejected. No transactions — a crash mid-write corrupts the file. Atomicity would have to be hand-rolled with temp-file-plus-rename, which does not extend to updating two files together. Rewrites the whole catalog for a one-item change. |
+| **SQLite** | **Chosen.** Full ACID transactions. Native `INSERT ... ON CONFLICT DO UPDATE`. Single portable file. Ships inside Python, so it adds no dependency. Handles millions of rows comfortably. |
+| **PostgreSQL** | Right answer at real scale — concurrent writers, replication, richer indexing, JSONB with GIN indexes for search. Rejected here only because requiring a reviewer to stand up a server to run a take-home is the wrong trade. |
+| **MongoDB** | Document model fits heterogeneous catalog items nicely and its upsert semantics map well. Rejected for the same operational reason, plus multi-document transactions need a replica set. |
+| **Elasticsearch** | The right *search* layer, and end-users searching across providers is the stated goal. But it is a poor system of record: no real transactions, and reindexing needs a durable source. It belongs *downstream* of this database, not instead of it. |
 
-Elasticsearch is the right *search* layer, and end-users searching across providers is the actual goal — but it's a poor system of record, with no real transactions and a reindex that needs a durable source. It belongs downstream of this database, not in place of it.
-
-So: SQLite. Full ACID transactions, native `INSERT ... ON CONFLICT DO UPDATE`, a single portable file, and it ships inside Python so it adds no dependency. It handles millions of rows without complaint. And because `storage.py` exposes a deliberately narrow interface — `apply\_segment`, `get\_provider\_state`, `list\_items` — nothing else in the codebase knows SQL exists, so swapping in Postgres later is a contained change.
+**The decisive point:** the interface in `storage.py` is deliberately narrow — `apply_segment`, `get_provider_state`, `list_items`. Nothing else in the codebase knows SQL exists. Migrating to Postgres means rewriting that one file. Choosing SQLite now is therefore a cheap decision to reverse, which is exactly the kind of decision worth making quickly.
 
 ### Schema
 
 ```sql
-CREATE TABLE catalog\_items (
-    provider\_id    TEXT    NOT NULL,
-    item\_id        TEXT    NOT NULL,
+CREATE TABLE catalog_items (
+    provider_id    TEXT    NOT NULL,
+    item_id        TEXT    NOT NULL,
     payload        TEXT    NOT NULL,   -- the item's full JSON document
-    source\_version INTEGER NOT NULL,   -- which segment last wrote this row
-    updated\_at     TEXT    NOT NULL,
-    PRIMARY KEY (provider\_id, item\_id)
+    source_version INTEGER NOT NULL,   -- which segment last wrote this row
+    updated_at     TEXT    NOT NULL,
+    PRIMARY KEY (provider_id, item_id)
 );
 
-CREATE TABLE provider\_state (
-    provider\_id          TEXT PRIMARY KEY,
-    last\_applied\_version INTEGER NOT NULL DEFAULT 0,
-    last\_index\_version   INTEGER,
-    last\_crawled\_at      TEXT,
-    last\_status          TEXT
+CREATE TABLE provider_state (
+    provider_id          TEXT PRIMARY KEY,
+    last_applied_version INTEGER NOT NULL DEFAULT 0,
+    last_index_version   INTEGER,
+    last_crawled_at      TEXT,
+    last_status          TEXT
 );
 
-CREATE TABLE applied\_segments (
-    provider\_id     TEXT    NOT NULL,
-    segment\_version INTEGER NOT NULL,
+CREATE TABLE applied_segments (
+    provider_id     TEXT    NOT NULL,
+    segment_version INTEGER NOT NULL,
     digest          TEXT    NOT NULL,
-    upsert\_count    INTEGER NOT NULL,
-    removal\_count   INTEGER NOT NULL,
-    applied\_at      TEXT    NOT NULL,
-    PRIMARY KEY (provider\_id, segment\_version)
+    upsert_count    INTEGER NOT NULL,
+    removal_count   INTEGER NOT NULL,
+    applied_at      TEXT    NOT NULL,
+    PRIMARY KEY (provider_id, segment_version)
 );
 ```
 
-A few things worth explaining. The primary key on `catalog\_items` is the composite `(provider\_id, item\_id)` because item IDs are only unique within a provider — two providers might both use `sku-1001` for completely different products. Keying on `item\_id` alone would let one provider overwrite or delete another's inventory, which is both a data bug and an attack; the composite key makes it impossible.
+Three design decisions worth calling out:
 
-The item body is stored as a JSON document rather than exploded into columns. Providers publish heterogeneous catalogs — retail items and services won't share a column layout, and onboarding a new provider shouldn't need a schema migration. Promoting the identity fields to real columns keeps lookups indexed while leaving the body flexible. If specific fields need querying later, SQLite supports generated columns and expression indexes over JSON without a rewrite.
+**The composite primary key `(provider_id, item_id)`.** Item IDs are only unique *within* a provider. Two providers may both use `sku-1001` for entirely different products. Keying on `item_id` alone would let one provider silently overwrite or delete another's inventory — a data-integrity bug that also happens to be an attack. The composite key makes that structurally impossible.
 
-`applied\_segments` is an audit trail — it answers "when did we ingest this, and what digest did we verify?" long after the fact, and doubles as a second layer of idempotency protection.
+**The item body stored as a JSON document.** Providers publish heterogeneous catalogs — retail items and services will not share a column layout, and a new provider must not require a schema migration. Storing the body as JSON with the identity fields promoted to real columns keeps ingestion flexible while keeping lookups indexed. If specific fields later need querying, SQLite supports generated columns and expression indexes over JSON without a rewrite.
+
+**`applied_segments` as an audit trail.** Answers "when did we ingest this, and what digest did we verify?" long after the fact, and provides a second layer of idempotency protection.
 
 ### Merge semantics
 
 Upserts use SQLite's native upsert:
 
 ```sql
-INSERT INTO catalog\_items (provider\_id, item\_id, payload, source\_version, updated\_at)
+INSERT INTO catalog_items (provider_id, item_id, payload, source_version, updated_at)
 VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(provider\_id, item\_id) DO UPDATE SET
+ON CONFLICT(provider_id, item_id) DO UPDATE SET
     payload        = excluded.payload,
-    source\_version = excluded.source\_version,
-    updated\_at     = excluded.updated\_at;
+    source_version = excluded.source_version,
+    updated_at     = excluded.updated_at;
 ```
 
-Removals are a scoped delete. Deleting an ID that isn't there is a no-op rather than an error, because providers do legitimately republish removals and a harmless duplicate shouldn't fail an otherwise-valid segment.
+Removals are a scoped delete. Deleting an ID that does not exist is treated as a **no-op, not an error** — providers legitimately republish removals, and a harmless duplicate must not fail an otherwise valid segment.
 
-Because segments are deltas, order matters: applying v2 before v1 lands you in a different, wrong end state. The crawler sorts by version and applies strictly in sequence. If the index has a gap — v1 and v3 but no v2 — it applies v1 and stops, and picks up the rest on a later run once v2 shows up, rather than skipping ahead and corrupting the merged view.
+**Segments are deltas, so order is load-bearing.** Applying v2 before v1 produces a different, wrong end state. The crawler sorts by version and applies strictly in sequence. If the index has a *gap* (v1 and v3 but no v2), it applies v1 and stops, picking up the rest on a later run once v2 appears — rather than skipping ahead and silently corrupting the merged view.
+
+---
 
 ## Resilience: what happens when it crashes
 
-The brief asks specifically about a crash halfway through downloading or saving a segment. Both are handled, and each has a test.
+The assignment asks specifically about a crash halfway through downloading or saving a segment. Both cases are handled, and each has a test.
 
-**Crashing while downloading** is the easy case, because nothing's been written yet. The crawler pulls the whole segment into memory, verifies its digest, and only then opens a transaction. A partial download just fails the digest check — a truncated file hashes to something else — the provider's progress marker is untouched, and the next run retries from the same point. There's no window where partially-downloaded bytes reach the database.
+### Crash while downloading
 
-**Crashing while saving** is the case that actually matters, and it's handled by putting the data and the progress marker in the same transaction:
+Nothing has been written yet — the crawler downloads the entire segment into memory, verifies its digest, and only then opens a transaction. A partial download simply fails the digest check, because a truncated file hashes to something different. The provider's progress marker is untouched, and the next run retries from the same point.
+
+There is no window in which partially downloaded bytes could reach the database.
+
+### Crash while saving
+
+This is the case that matters, and it is handled by putting **the data and the progress marker in the same transaction**:
 
 ```python
 with self.transaction() as cur:          # BEGIN IMMEDIATE
     ... all upserts ...
     ... all removals ...
     ... record the applied segment ...
-    ... advance last\_applied\_version ...
+    ... advance last_applied_version ...
                                           # COMMIT
 ```
 
-Sharing a transaction means they share a fate. SQLite writes to a write-ahead log first and only marks the transaction committed once that log entry is durable, so at any instant the on-disk database reflects either the state before the segment or the state after it, never halfway. Kill the process mid-write and the next connection finds an uncommitted transaction and rolls it back during recovery.
+Because they share a transaction, they share a fate. SQLite writes to a write-ahead log first and only marks the transaction committed once that log entry is durable, so at any instant the database on disk reflects either the state *before* the segment or the state *after* it — never halfway. If the process is killed mid-write, the next connection sees an uncommitted transaction and rolls it back automatically during recovery.
 
-The database runs with `journal\_mode=WAL` and `synchronous=FULL`, so every commit is fsynced. That costs some write throughput and buys the guarantee that a committed transaction survives an OS crash or power loss — which is exactly the guarantee the rest of this design leans on.
+The database is configured with `journal_mode=WAL` and `synchronous=FULL`, meaning every commit is fsynced. That costs some write throughput and buys the guarantee that a committed transaction survives an OS crash or power loss — which is precisely the guarantee this design leans on.
 
-The invariant that makes restart trivial is that `last\_applied\_version` can never be ahead of, or behind, the data it describes. On the next run the crawler reads the marker and resumes from the following segment. No repair step, no reconciliation pass, no partial state to detect.
+### The key invariant
 
-A few things follow from that. Re-running over already-processed data changes nothing, so it's safe to schedule aggressively or re-run after a failure without thinking about it. Segments commit one at a time, so if v1–v5 succeed and v6 is corrupt, v1–v5 stay applied and the next run retries only v6. Each provider crawls in its own try/except with its own transactions, so one provider serving garbage can't block the others. And because the transaction context manager catches `BaseException` rather than just `Exception`, a `Ctrl+C` rolls back cleanly instead of leaving a transaction dangling.
+> `last_applied_version` can never be ahead of, or behind, the data it describes.
 
-One thing I deliberately didn't handle: two crawler processes running concurrently against the same database would both attempt the same segments. `BEGIN IMMEDIATE` keeps that safe — one blocks, and the loser's work is idempotent anyway — but it's wasteful. A production deployment would add an advisory lock or a lease per provider. I'm calling it out rather than pretending it's solved, because it's a real gap, just not one worth fixing at this scale.
+That is what makes restart trivial. On the next run the crawler reads the marker and resumes from the following segment. There is no repair step, no reconciliation pass, no partial state to detect.
+
+### Consequences that follow from it
+
+- **Idempotent.** Re-running over already-processed data changes nothing. Safe to schedule aggressively or re-run after a failure without thinking about it.
+- **Progress is never lost.** Segments commit one at a time, so if v1..v5 succeed and v6 is corrupt, v1..v5 stay applied and the next run retries only v6.
+- **Failure isolation.** Each provider crawls in its own try/except with its own transactions. One provider serving garbage cannot block the others.
+- **Ctrl+C is safe.** The transaction context manager catches `BaseException`, not just `Exception`, so a `KeyboardInterrupt` rolls back rather than leaving a transaction dangling.
+
+### What is deliberately *not* handled
+
+Two crawler processes running concurrently against the same database would both attempt the same segments. `BEGIN IMMEDIATE` makes this safe — one blocks, and the loser's work is idempotent anyway — but it is wasteful. A production deployment would add an advisory lock or lease per provider. This is called out rather than silently ignored because it is a real gap, just not one worth solving at this scale.
+
+---
 
 ## Testing
 
 ```bash
 python -m pytest              # all 47 tests
 python -m pytest -v           # verbose
-python -m pytest tests/test\_verification.py   # security tests only
+python -m pytest tests/test_verification.py   # security tests only
 ```
 
-Every test builds its own provider in a temp directory with a freshly-generated keypair and genuinely valid signatures — nothing is stubbed. They drive the same fetch → verify → store path a real crawl uses, just over `file://` URLs, so they run offline in under a second while still exercising the real cryptography.
+Every test builds its own provider in a temporary directory with a freshly generated keypair and genuinely valid signatures. Nothing is stubbed. The tests drive the same fetch → verify → store path a production crawl uses, just over `file://` URLs — so they run offline in under a second while still exercising the real cryptography.
 
-* `tests/test\_verification.py` — 16 tests. Valid signatures accepted, every tampering scenario above rejected.
-* `tests/test\_storage.py` — 14 tests. Merge semantics, provider isolation, and the atomicity guarantees, including deliberately crashing mid-transaction and asserting the database is untouched.
-* `tests/test\_crawler.py` — 17 tests. End-to-end crawls, incremental publishes, resume-after-crash, failure isolation, config validation.
+| File | Covers |
+|---|---|
+| `tests/test_verification.py` | 16 tests. Valid signatures accepted; every tampering scenario in the attack table rejected. |
+| `tests/test_storage.py` | 14 tests. Merge semantics, provider isolation, and the atomicity guarantees — including deliberately crashing mid-transaction and asserting the database is untouched. |
+| `tests/test_crawler.py` | 17 tests. End-to-end crawls, incremental publishes, resume-after-crash, failure isolation, config validation. |
 
-The one I'd point at first is `test\_crash\_midway\_through\_a\_transaction\_leaves\_no\_partial\_data`, since it proves the resilience claim above rather than just asserting it in prose.
+The most important test is `test_crash_midway_through_a_transaction_leaves_no_partial_data`, which proves the resilience claim above rather than just asserting it in prose.
+
+---
 
 ## Configuration reference
 
-No URL appears anywhere in the source — it all lives in the config file, chosen at runtime with `--config`.
+No URL appears anywhere in the source. Everything lives in the config file, chosen at runtime with `--config`.
 
 ```yaml
 crawler:
-  database\_path: ./data/catalog.db   # relative paths resolve against this file
-  request\_timeout\_seconds: 10        # give up on a silent server
-  max\_retries: 3                     # retry transient failures
-  retry\_backoff\_seconds: 0.5         # 0.5s, 1s, 2s between attempts
-  max\_download\_bytes: 10485760       # 10 MiB cap per file
+  database_path: ./data/catalog.db   # relative paths resolve against this file
+  request_timeout_seconds: 10        # give up on a silent server
+  max_retries: 3                     # retry transient failures
+  retry_backoff_seconds: 0.5         # 0.5s, 1s, 2s between attempts
+  max_download_bytes: 10485760       # 10 MiB cap per file
 
 providers:
   - id: acme-retail
-    manifest\_url: ./mock\_provider/public/manifest.json
+    manifest_url: ./mock_provider/public/manifest.json
     enabled: true
 ```
 
-Adding a provider is a config change with no code change. Setting `enabled: false` quarantines a misbehaving provider without deleting its history.
+Adding a provider is a config change with no code change. `enabled: false` quarantines a misbehaving provider without deleting its history.
 
 ### CLI
 
-* `python main.py crawl` — run the crawler.
-* `python main.py status` — per-provider version, status, and last crawl time.
-* `python main.py list` — dump the merged catalog as JSON (`--provider` to filter).
-* `-v` / `--verbose` — debug logging.
+| Command | Purpose |
+|---|---|
+| `python main.py crawl` | Run the crawler |
+| `python main.py status` | Per-provider version, status and last crawl time |
+| `python main.py list` | Dump the merged catalog as JSON (`--provider` to filter) |
+| `-v` / `--verbose` | Debug logging |
 
-Exit codes are meaningful so the crawler can be scheduled and monitored without parsing its output: `0` all providers succeeded, `1` at least one failed, `2` the config was invalid.
+Exit codes are meaningful so the crawler can be scheduled and monitored without parsing its output: `0` all providers succeeded, `1` at least one failed, `2` the configuration was invalid.
 
-## Trade-offs and what I'd change at scale
+---
 
-A handful of things I chose deliberately for this exercise, with what production would want instead.
+## Trade-offs and what I would change at scale
 
-Segments are downloaded fully into memory. That's fine for deltas of a few megabytes and it keeps the verify-before-parse logic simple. At hundreds of megabytes I'd stream to a temp file and hash while streaming, then parse — still verifying before parsing either way, since parsing untrusted input is its own attack surface.
+Choices made deliberately for this exercise, and what production would need instead:
 
-Providers are crawled sequentially, which is clear and correct but I/O-bound once there are hundreds of them. They're fully independent, so they parallelise cleanly with a worker pool — at which point Postgres beats SQLite for the concurrent writes.
+**Segments are downloaded fully into memory.** Fine for catalog deltas of a few megabytes and it keeps the verify-before-parse logic simple. At hundreds of megabytes I would stream to a temp file, hash while streaming, and only then parse — verifying before parsing either way, since parsing untrusted input is itself an attack surface.
 
-The signature covers a re-serialised canonical payload (sorted keys, no whitespace). That's simple and keeps the mock files human-readable, which matters for a take-home. Production should use RFC 8785 (JSON Canonicalization Scheme), which pins down number formatting exactly, or a JWS-style layout where the payload travels as base64url of the exact original bytes so there's no re-serialisation at all. There's a note about this in `crawler/canonical.py`.
+**Providers are crawled sequentially.** Clear, easy to reason about, and correct. With hundreds of providers this becomes I/O-bound and wasteful; since providers are fully independent, they parallelise cleanly with a worker pool. Postgres would then be a better fit than SQLite for concurrent writers.
 
-There's no key rotation or revocation. The `key\_id` field is in place so rotation can be added without a format change, but there's no expiry, no key history, and no revocation list. A real network needs all three.
+**The signature covers a re-serialised payload.** Canonical JSON (sorted keys, no whitespace) is simple and keeps the mock files human-readable, which matters for a reviewable take-home. Production should use RFC 8785 (JSON Canonicalization Scheme), which pins down number formatting precisely, or a JWS-style layout where the payload travels as base64url of the *exact original bytes* so no re-serialisation ever happens. This is noted in `crawler/canonical.py`.
 
-There are no conditional requests. Adding `If-None-Match` / `If-Modified-Since` would let providers return `304 Not Modified` and save bandwidth on the common no-change case. Easy to add to the fetcher.
+**No key rotation or revocation.** The `key_id` field is in place so rotation can be added without a format change, but there is no expiry, no key history, and no revocation list. A real network needs all three.
 
-There's no search layer. The stated goal is end-users searching across providers; this database is the durable system of record, and a search index (Elasticsearch, or SQLite FTS5 for modest volumes) would be fed from it rather than replacing it.
+**No conditional requests.** Adding `If-None-Match` / `If-Modified-Since` would let providers return `304 Not Modified` and save bandwidth on the common no-change case. Straightforward to add to the fetcher.
 
-And ordering assumes a single publisher per provider — segment versions are a plain increasing integer. Multiple independent publishers behind one provider would need a coordinated sequence or something like vector clocks.
+**No search layer.** The goal is end-users searching across providers. This database is the durable system of record; a search index (Elasticsearch, or SQLite FTS5 for modest volumes) would be fed from it rather than replacing it.
+
+**Ordering assumes one publisher per provider.** Segment versions are a simple increasing integer. If a provider had multiple independent publishers, they would need a coordinated sequence or a different ordering scheme such as vector clocks.
+
+---
 
 ## Project layout
 
@@ -366,17 +443,16 @@ decentralized-catalog-crawler/
 │   ├── crawler.py                 orchestration
 │   ├── canonical.py               deterministic JSON for signing
 │   └── errors.py                  typed exceptions
-├── mock\_provider/
-│   ├── generate\_mock\_data.py      generates a real keypair and signs the files
+├── mock_provider/
+│   ├── generate_mock_data.py      generates a real keypair and signs the files
 │   └── public/                    the "CDN": manifest, index, segments
 ├── scripts/
-│   └── demo\_tamper.py             live demonstration of tamper detection
+│   └── demo_tamper.py             live demonstration of tamper detection
 └── tests/
     ├── conftest.py                fixtures that build signed providers
-    ├── test\_verification.py       security tests
-    ├── test\_storage.py            merge and atomicity tests
-    └── test\_crawler.py            end-to-end tests
+    ├── test_verification.py       security tests
+    ├── test_storage.py            merge and atomicity tests
+    └── test_crawler.py            end-to-end tests
 ```
 
-One note on the mock provider's private key: `generate\_mock\_data.py` writes `mock\_provider/private\_key.pem` so the mock data is reproducible, and it's excluded by `.gitignore` — a real provider's signing key would live in a KMS or HSM and never touch source control. The public key is committed inside `manifest.json`, which is where it belongs.
-
+**A note on the mock provider's private key.** `generate_mock_data.py` writes `mock_provider/private_key.pem` so the mock data is reproducible. It is excluded by `.gitignore`, because a real provider's signing key would live in a KMS or HSM and never touch source control. The *public* key is committed inside `manifest.json`, which is exactly where it belongs.
